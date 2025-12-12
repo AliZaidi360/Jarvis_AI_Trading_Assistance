@@ -125,7 +125,8 @@ class TradingBot:
             return
             
         # Sizing
-        qty, leverage = self.risk.calculate_position_size_with_spread(
+        # HARD-CODED FORMULA ENFORCEMENT via RiskEngine
+        qty, leverage = self.risk.calculate_position_size(
             equity, volatility, mid_price, spread
         )
         

@@ -70,43 +70,41 @@ class RiskEngine:
             return False
         return True
 
-    def calculate_position_size(self, equity, volatility, mid_price):
+    def calculate_position_size(self, equity, volatility, mid_price, spread=None):
         """
-        Uses the Volatility-Sizing Logic.
-        Notional = (0.005 * Equity) / (2 * Sigma * sqrt(H))
+        HARD-CODED FORMULAS (DO NOT OPTIMIZE):
+        1. Worst Case Move: Delta_wc = 2 * sigma * sqrt(h)
+        2. Notional: (0.005 * Equity) / Delta_wc
+        3. Leverage Cap: min(5, 1/sigma, 0.5/spread)
         """
         # 1. Risk Budget: 0.5% of Equity
-        risk_amt = Config.RISK_PER_TRADE_PERCENT * equity
+        # Formula: Notional = 0.005 * Equity / Delta_wc
+        risk_per_trade = Config.RISK_PER_TRADE_PERCENT # 0.005
         
-        # 2. Worst Case Move: 2 * Sigma * sqrt(H)
-        # Sigma is per-period (e.g. 1m). H is holding period in candles.
+        # 2. Worst Case Move
         sqrt_h = math.sqrt(Config.HOLDING_HORIZON_CANDLES)
+        if volatility <= 0:
+            return 0.0, 0.0
+
+        # Delta_wc = 2 * sigma * sqrt(h)
         worst_case_pct = 2.0 * volatility * sqrt_h
         
+        # 3. Position Notional
         if worst_case_pct == 0:
-            return 0.0, 0.0 # No volatility, no trade
-            
-        # 3. Notional Position Size (USD)
-        # RiskAmt = Notional * WorstCasePct
-        # -> Notional = RiskAmt / WorstCasePct
-        notional_size_usd = risk_amt / worst_case_pct
+            notional_size_usd = 0.0
+        else:
+            notional_size_usd = (risk_per_trade * equity) / worst_case_pct
         
         # 4. Leverage Caps
-        # Cap 1: Hard Cap (5x)
-        cap1 = Config.MAX_LEVERAGE_CAP
+        # Lev = min(5, 1/sigma, 0.5/Spread)
+        cap1 = Config.MAX_LEVERAGE_CAP # 5.0
+        cap2 = 1.0 / volatility
         
-        # Cap 2: Volatility scaling (1/Sigma) - "Kelly-ish" heuristic
-        cap2 = 1.0 / volatility if volatility > 0 else 5.0
-        
-        # Cap 3: Spread impact (0.5 / Spread) - Avoid trading when spread ~ edge
-        # Assume generic spread for calc or ignore if safe. 
-        # Plan said: Leverage = min(5, 1/sigma, 0.5/Spread)
-        # We need spread passed in? Let's assume passed in or ignored here.
-        # Let's refine signature to take spread if we strictly follow the requirement.
-        # I'll stick to the args and maybe assume a safe spread or add it.
-        # Let's add 'spread' to args.
-        
-        final_leverage_cap = min(cap1, cap2)
+        cap3 = float('inf')
+        if spread and spread > 0:
+            cap3 = 0.5 / spread
+            
+        final_leverage_cap = min(cap1, cap2, cap3)
         
         # Max Notional based on leverage
         max_notional_lev = equity * final_leverage_cap
@@ -118,22 +116,6 @@ class RiskEngine:
         quantity = final_position_usd / mid_price
         
         return quantity, final_position_usd / equity  # Qty, LeverageUsed
-
-    def calculate_position_size_with_spread(self, equity, volatility, mid_price, spread):
-        # Overloaded/Helper to include spread cap
-        qty, lev = self.calculate_position_size(equity, volatility, mid_price)
-        
-        # Check Spread Cap
-        if spread > 0:
-            spread_cap = 0.5 / spread
-            current_lev = lev
-            if current_lev > spread_cap:
-                # Reduce
-                target_lev = spread_cap
-                qty = (equity * target_lev) / mid_price
-                lev = target_lev
-        
-        return qty, lev
 
     def get_stop_loss_price(self, entry_price, direction, volatility):
         """

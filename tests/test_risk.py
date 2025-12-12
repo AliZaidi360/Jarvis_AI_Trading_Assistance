@@ -63,5 +63,21 @@ class TestRiskEngine(unittest.TestCase):
         
         self.assertLess(leverage, 0.1) # Should be very small
 
+    def test_position_sizing_spread_cap(self):
+        risk = RiskEngine()
+        equity = 10000.0
+        mid_price = 50000.0
+        volatility = 0.00001 # Minimal vol -> high leverage normally
+        spread = 0.05 # 5% spread -> Cap should be 0.5/0.05 = 10x? No, cap is min(5, ...)
+        # Wait, if spread is huge (0.05), cap is 10.
+        # If spread is 0.2 (20%), cap is 0.5/0.2 = 2.5x.
+        
+        spread_huge = 0.2 # 20% spread
+        qty, leverage = risk.calculate_position_size(equity, volatility, mid_price, spread=spread_huge)
+        
+        # Expected limit: 0.5 / 0.2 = 2.5
+        self.assertLessEqual(leverage, 2.51)
+        self.assertGreater(leverage, 0)
+
 if __name__ == '__main__':
     unittest.main()

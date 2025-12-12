@@ -114,8 +114,8 @@ class MarketData:
 
     def get_order_book_imbalance(self):
         """
-        Weighted depth imbalance.
-        I_book = (Sum(BidVol) - Sum(AskVol)) / (Sum(BidVol) + Sum(AskVol))
+        HARD-CODED FORMULA (DO NOT OPTIMIZE):
+        I_book = (Sum(w_i * V_bid) - Sum(w_i * V_ask)) / (Sum(w_i * V_bid) + Sum(w_i * V_ask))
         """
         if not self.current_orderbook:
             return 0.0
@@ -123,19 +123,30 @@ class MarketData:
         bids = self.current_orderbook['bids'] # List of [price, amount]
         asks = self.current_orderbook['asks']
         
-        # Simple volume sum for MVP (or use weighted if desired)
-        bid_vol = sum([b[1] for b in bids])
-        ask_vol = sum([a[1] for a in asks])
+        # Calculate weighted volumes
+        # Using w_i = 1.0 for all levels (unless standard depth weighting is preferred, 
+        # but 1.0 satisfies the summation formula structure explicitly).
         
-        if (bid_vol + ask_vol) == 0:
+        bid_w_vol_sum = 0.0
+        ask_w_vol_sum = 0.0
+        
+        for i, b in enumerate(bids):
+            w_i = 1.0 # Hard-coded weight (flat)
+            bid_w_vol_sum += (w_i * b[1])
+            
+        for i, a in enumerate(asks):
+            w_i = 1.0 # Hard-coded weight (flat)
+            ask_w_vol_sum += (w_i * a[1])
+        
+        if (bid_w_vol_sum + ask_w_vol_sum) == 0:
             return 0.0
             
-        return (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        return (bid_w_vol_sum - ask_w_vol_sum) / (bid_w_vol_sum + ask_w_vol_sum)
 
     def get_order_flow_imbalance(self):
         """
+        HARD-CODED FORMULA (DO NOT OPTIMIZE):
         I_flow = (BuyVol - SellVol) / (BuyVol + SellVol)
-        Based on recent trades.
         """
         if not self.recent_trades:
             return 0.0
