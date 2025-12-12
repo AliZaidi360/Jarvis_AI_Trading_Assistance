@@ -15,6 +15,50 @@ This is a **risk-first** algorithmic trading agent designed for crypto perpetual
 - **Volatility Sizing**: Position size scales inversely with realized volatility.
 - **No Black Box**: Logic is explicit and deterministic.
 
+## Math & Formulas (Hard-Coded)
+The agent strictly enforces the following equations:
+
+### 1. Feature Computation
+**Order Book Imbalance**:
+```math
+I_{book} = \frac{\sum w_i V^{bid}_i - \sum w_i V^{ask}_i}{\sum w_i V^{bid}_i + \sum w_i V^{ask}_i}
+```
+*Implemented in `src/market_data.py`*
+
+**Order Flow Imbalance**:
+```math
+I_{flow} = \frac{BuyVol - SellVol}{BuyVol + SellVol}
+```
+*Implemented in `src/market_data.py`*
+
+**Direction Score**:
+```math
+D = \tanh(0.5 \cdot I_{book} + 0.5 \cdot I_{flow})
+```
+*Implemented in `src/alpha.py`*
+
+### 2. Risk & Sizing
+**Worst-Case Move**:
+```math
+\Delta_{wc} = 2 \cdot \hat\sigma \cdot \sqrt{h}
+```
+
+**Position Notional**:
+```math
+Notional = \frac{0.005 \cdot Equity}{\Delta_{wc}}
+```
+
+**Leverage Cap**:
+```math
+Leverage = \min\left(5,\; \frac{1}{\hat\sigma},\; \frac{0.5}{Spread}\right)
+```
+
+**Volatility Stop**:
+```math
+Stop = m \cdot \hat\sigma \cdot \sqrt{h}
+```
+*All Risk Logic implemented in `src/risk.py`*
+
 ## Project Structure
 ```
 .
