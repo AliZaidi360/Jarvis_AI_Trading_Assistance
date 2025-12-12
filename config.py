@@ -69,6 +69,8 @@ class Config:
     ORDER_TIMEOUT_SECONDS = 30
     
     # ---------------------------------------------------------
-    # LOGGING
+    # LLM EXPLAINER
     # ---------------------------------------------------------
-    LOG_FILE = 'trading_agent.jsonl'
+    LLM_API_KEY = os.getenv('LLM_API_KEY', None)
+    LLM_MODEL = "gpt-4-turbo" # or equivalent
+

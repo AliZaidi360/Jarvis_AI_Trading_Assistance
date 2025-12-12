@@ -8,6 +8,8 @@ try:
     from src.execution import ExecutionEngine
     from src.risk import RiskEngine
     from src.alpha import AlphaEngine
+    from src.llm_explainer import LLMExplainer
+    import threading
 except ImportError:
     # Fallback for relative
     import sys
@@ -18,6 +20,8 @@ except ImportError:
     from src.execution import ExecutionEngine
     from src.risk import RiskEngine
     from src.alpha import AlphaEngine
+    from src.llm_explainer import LLMExplainer
+    import threading
 
 # Setup structured logging
 logging.basicConfig(
@@ -37,6 +41,7 @@ class TradingBot:
         self.exec = ExecutionEngine(self.md.exchange)
         self.risk = RiskEngine()
         self.alpha = AlphaEngine()
+        self.explainer = LLMExplainer(Config.LLM_API_KEY)
         
         # State
         self.entry_time = None
@@ -63,6 +68,17 @@ class TradingBot:
             # Real-time data might need faster polling, but let's stick to simple loop.
             time.sleep(10) 
 
+    def _async_explain(self, log_entry):
+        """
+        Background task to generate explanation
+        """
+        try:
+            explanation = self.explainer.generate_explanation(log_entry)
+            # Log the explanation as a clear separate event
+            logger.info(f"JARVIS_EXPLAINER: {explanation}")
+        except Exception as e:
+            logger.error(f"Explainer Failed: {e}")
+
     def log_decision(self, decision_type, reason, metrics):
         """
         Structured logging for Decision Explanations.
@@ -75,6 +91,9 @@ class TradingBot:
             "metrics": metrics
         }
         logger.info(f"DECISION: {json.dumps(log_entry)}")
+        
+        # Trigger LLM Explanation in background (Fire-and-forget)
+        threading.Thread(target=self._async_explain, args=(log_entry,)).start()
 
     def run_cycle(self):
         # 1. Update Market Data
