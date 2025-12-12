@@ -3,3 +3,7 @@ pandas
 numpy
 python-dotenv
 pytest
+requests
+fastapi
+uvicorn
+python-multipart

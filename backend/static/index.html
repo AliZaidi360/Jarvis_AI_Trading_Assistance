@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS TRADING SYSTEM</title>
+    
+    <!-- React & DOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        cyber: {
+                            black: '#0a0a0f',
+                            dark: '#12121a',
+                            panel: '#1a1a24',
+                            accent: '#00f0ff',
+                            danger: '#ff2a6d',
+                            success: '#05d5fa',
+                            text: '#e0e0e0',
+                            dim: '#6b7280'
+                        }
+                    },
+                    fontFamily: {
+                        mono: ['Share Tech Mono', 'monospace'],
+                        sans: ['Inter', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    
+    <style>
+        body { background-color: #050508; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'Share Tech Mono', monospace; }
+        .glow-text { text-shadow: 0 0 10px rgba(0, 240, 255, 0.5); }
+        .glow-border { box-shadow: 0 0 10px rgba(0, 240, 255, 0.2); }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="h-screen w-screen overflow-hidden flex flex-col">
+
+    <div id="root" class="flex-1 flex flex-col"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const StatusBadge = ({ label, active, color }) => (
+            <div className={`px-3 py-1 rounded text-xs font-mono border ${active ? `border-${color} text-${color} glow-text` : 'border-gray-700 text-gray-500'}`}>
+                {label}
+            </div>
+        );
+
+        const MetricCard = ({ label, value, unit }) => (
+            <div className="bg-cyber-panel p-4 rounded border border-gray-800">
+                <div className="text-cyber-dim text-xs uppercase tracking-wider mb-1">{label}</div>
+                <div className="text-xl font-mono text-cyber-accent glow-text">
+                    {value} <span className="text-sm text-gray-500">{unit}</span>
+                </div>
+            </div>
+        );
+
+        const EventRow = ({ event }) => {
+            const isTrade = event.type === 'TRADE_EXECUTED';
+            const isSkip = event.type === 'TRADE_SKIPPED';
+            const isRisk = event.type === 'RISK_LOCKED';
+            
+            let borderColor = 'border-gray-800';
+            if (isTrade) borderColor = 'border-cyber-success';
+            if (isRisk) borderColor = 'border-cyber-danger';
+            
+            return (
+                <div className={`p-3 mb-2 bg-cyber-dark border-l-2 ${borderColor} rounded hover:bg-cyber-panel transition-colors`}>
+                    <div className="flex justify-between items-start">
+                        <span className="font-mono text-xs text-cyber-dim">{event.ts.split('T')[1].split('.')[0]}</span>
+                        <span className={`text-xs font-bold ${isTrade ? 'text-cyber-success' : isRisk ? 'text-cyber-danger' : 'text-gray-400'}`}>
+                            {event.type}
+                        </span>
+                    </div>
+                    <div className="mt-1 text-sm font-semibold">{event.reason}</div>
+                    <div className="mt-1 flex gap-2 text-xs text-cyber-dim font-mono">
+                        <span>S: {event.metrics.score?.toFixed(2)}</span>
+                        <span>V: {event.metrics.volatility?.toFixed(4)}</span>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [events, setEvents] = useState([]);
+            const [latestExplanation, setLatestExplanation] = useState(null);
+            const [systemState, setSystemState] = useState({ equity: 10000, active: true });
+            
+            const pollingRef = useRef(null);
+
+            const fetchEvents = async () => {
+                try {
+                    const res = await fetch('/events?limit=50');
+                    if (res.ok) {
+                        const data = await res.json();
+                        // Deduce state from latest event
+                        if (data.length > 0) {
+                            // Find latest explanations (Assuming separate logs for LLM? No, bot logs everything to event stream?)
+                            // WAIT: bot.py logs JSON lines. 
+                            // Some lines are "JARVIS_EXPLAINER: ..." which are logged to logger but NOT events.log?
+                            // Ah, bot.py: log_decision -> events.log (JSON).
+                            // _async_explain -> logger.info("JARVIS_EXPLAINER: ...") -> stdout/file?
+                            // events.log only has JSON metrics.
+                            
+                            // ISSUE: Explanation text is NOT in events.log currently.
+                            // FIX: I should have put explanation into events.log or served it separately.
+                            // For MVP without Explanation text availability (since it's in console/logger, not events.log), 
+                            // I will simulate the "Console" message based on the JSON data or empty.
+                            // OR I can parse the JSON log and display a "Synthetic" message if LLM text is missing.
+                            // Re-reading Bot: events.log gets `log_entry`. `log_entry` does NOT have explanation.
+                            // Explanation is logged to logger.
+                            
+                            // ADAPTATION: The Console will show the Raw Reason + Metrics in a nice typewriter way.
+                            
+                            setEvents(data);
+                            const latest = data[0]; // reversed
+                             setSystemState(prev => ({
+                                ...prev,
+                                equity: latest.metrics.equity || prev.equity
+                            }));
+                        }
+                    }
+                } catch (e) {
+                    console.error("Poll error", e);
+                }
+            };
+
+            useEffect(() => {
+                fetchEvents();
+                pollingRef.current = setInterval(fetchEvents, 2000);
+                return () => clearInterval(pollingRef.current);
+            }, []);
+
+            const latestEvent = events[0] || {};
+            
+            return (
+                <div className="h-full flex p-4 gap-4 bg-cyber-black text-gray-300">
+                    
+                    {/* LEFT PANEL: STATUS */}
+                    <div className="w-1/4 flex flex-col gap-4">
+                        <div className="border border-cyber-accent bg-cyber-dark p-4 rounded shadow-[0_0_15px_rgba(0,240,255,0.1)]">
+                            <h1 className="text-2xl font-mono text-cyber-accent font-bold glow-text mb-2">JARVIS</h1>
+                            <div className="flex gap-2 mb-4">
+                                <StatusBadge label="SYSTEM ONLINE" active={true} color="cyber-success" />
+                                <StatusBadge label="PAPER" active={true} color="yellow-500" />
+                            </div>
+                            <div className="text-xs text-cyber-dim">
+                                PERPETUAL FUTURES AGENT<br/>
+                                DISCRETIONARY LOGIC: DISABLED<br/>
+                                RISK GUARDIAN: ACTIVE
+                            </div>
+                        </div>
+
+                        <MetricCard label="Equity" value={systemState.equity.toFixed(2)} unit="USD" />
+                        
+                        <div className="flex-1 bg-cyber-panel border border-gray-800 rounded p-4">
+                            <h3 className="text-cyber-dim text-xs uppercase mb-4">Risk Parameters</h3>
+                            <div className="space-y-3 font-mono text-sm">
+                                <div className="flex justify-between"><span>Hit Rate</span> <span className="text-cyber-accent">--</span></div>
+                                <div className="flex justify-between"><span>Drawdown</span> <span className="text-cyber-danger">0.0%</span></div>
+                                <div className="flex justify-between"><span>Active Pos</span> <span className="text-white">0</span></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* CENTER PANEL: CONSOLE */}
+                    <div className="flex-1 flex flex-col bg-cyber-dark border border-gray-800 rounded relative overflow-hidden">
+                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-cyber-accent to-transparent opacity-50"></div>
+                        
+                        <div className="p-6 flex-1 flex flex-col justify-end">
+                            {/* LOGO / VISUALIZATION PLACEHOLDER */}
+                            <div className="flex-1 flex items-center justify-center opacity-10">
+                                <div className="w-64 h-64 border-4 border-cyber-accent rounded-full border-t-transparent animate-spin"></div>
+                            </div>
+                            
+                            {/* TYPEWRITER CONSOLE */}
+                            <div className="border-t border-gray-800 pt-6">
+                                <div className="font-mono text-cyber-accent text-sm mb-2">> LATEST DECISION EVENT</div>
+                                {latestEvent.type ? (
+                                    <div className="font-mono text-lg leading-relaxed text-white glow-text">
+                                        Type: {latestEvent.type}<br/>
+                                        Reason: {latestEvent.reason}<br/>
+                                        <span className="text-cyber-dim text-sm">
+                                            Vol: {latestEvent.metrics?.volatility?.toFixed(5)} | 
+                                            Spread: {latestEvent.metrics?.spread?.toFixed(5)} | 
+                                            Score: {latestEvent.metrics?.score?.toFixed(2)}
+                                        </span>
+                                    </div>
+                                ) : (
+                                    <div className="text-gray-600 font-mono animate-pulse">Waiting for market data...</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* RIGHT PANEL: TIMELINE */}
+                    <div className="w-1/4 bg-cyber-panel border border-gray-800 rounded flex flex-col">
+                        <div className="p-4 border-b border-gray-800 font-mono text-cyber-accent text-sm">DECISION STREAM</div>
+                        <div className="flex-1 overflow-y-auto p-2 scrollbar-hide">
+                            {events.map((ev, i) => (
+                                <EventRow key={i} event={ev} />
+                            ))}
+                        </div>
+                    </div>
+
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

@@ -1,14 +1,13 @@
-import ccxt
+import requests
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime, timedelta
-import random # For fallback if needed, or strictly use ccxt
+import time
+from datetime import datetime
 
 try:
     from config import Config
 except ImportError:
-    # Handle running from tests or different pwd
     import sys
     import os
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -17,126 +16,106 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class MarketData:
-    def __init__(self, exchange_id=None):
-        self.symbol = Config.SYMBOL
-        self.timeframe = Config.TIMEFRAME
-        self.limit = Config.ORDER_BOOK_DEPTH
+    def __init__(self):
+        self.symbol_id = "BTC-USD" # Coinbase format
+        self.base_url = "https://api.exchange.coinbase.com"
         
-        # Initialize Exchange
-        exchange_class = getattr(ccxt, exchange_id or Config.EXCHANGE_ID)
-        self.exchange = exchange_class({
-            'apiKey': Config.API_KEY,
-            'secret': Config.API_SECRET,
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'future'  # PERPETUALS
-            }
-        })
-        
-        if Config.SANDBOX_MODE:
-            self.exchange.set_sandbox_mode(True)
-            
-        # State Buffers
-        self.recent_trades = []
+        # Buffers
         self.ohlcv_buffer = pd.DataFrame()
-        self.current_orderbook = None
+        self.current_book = None
         self.current_ticker = None
-
+        
+        # Fallback/Init values
+        self.last_mid = None
+        
     def fetch_data(self):
-        """
-        Main update loop. Fetches all required data from exchange.
-        """
         try:
-            # 1. Fetch Order Book
-            self.current_orderbook = self.exchange.fetch_order_book(self.symbol, limit=self.limit)
+            # 1. Fetch Book (Level 1 as requested)
+            # Response: {bids:['price', 'size', num], asks:...}
+            book_resp = requests.get(f"{self.base_url}/products/{self.symbol_id}/book?level=1", timeout=5)
+            book_data = book_resp.json()
             
-            # 2. Fetch Recent Trades (for Flow Imbalance)
-            trades = self.exchange.fetch_trades(self.symbol, limit=100)
-            self.recent_trades = trades
+            # Simple validation
+            if 'bids' not in book_data or 'asks' not in book_data:
+                logger.warning("Coinbase Book data invalid")
+                return False
+                
+            self.current_book = book_data
             
-            # 3. Fetch Ticker (for Mid Price, Funding)
-            self.current_ticker = self.exchange.fetch_ticker(self.symbol)
+            # 2. Fetch Candles for Volatility
+            # Granularity 60 = 1 minute
+            # Coinbase returns [time, low, high, open, close, volume]
+            candles_resp = requests.get(
+                f"{self.base_url}/products/{self.symbol_id}/candles?granularity=60", 
+                timeout=5
+            )
+            candles = candles_resp.json()
             
-            # 4. Fetch OHLCV (for Volatility)
-            # We only need enough for the rolling window
-            candles = self.exchange.fetch_ohlcv(self.symbol, self.timeframe, limit=Config.VOLATILITY_WINDOW * 2)
-            self.ohlcv_buffer = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
+            # Coinbase returns NEWEST first. We flip for pandas usually.
+            if isinstance(candles, list) and len(candles) > 0:
+                # Cols: time, low, high, open, close, volume
+                # We need close for vol.
+                df = pd.DataFrame(candles, columns=['time', 'low', 'high', 'open', 'close', 'volume'])
+                df = df.sort_values('time')
+                self.ohlcv_buffer = df
+                
             return True
+            
         except Exception as e:
-            logger.error(f"Error fetching data: {e}")
+            logger.error(f"Coinbase Fetch Error: {e}")
             return False
 
     def get_mid_price(self):
-        if not self.current_orderbook:
+        if not self.current_book:
             return None
-        bid = self.current_orderbook['bids'][0][0]
-        ask = self.current_orderbook['asks'][0][0]
-        return (bid + ask) / 2.0
+        # Level 1 book: bids[0] is [price, size, num_orders]
+        best_bid = float(self.current_book['bids'][0][0])
+        best_ask = float(self.current_book['asks'][0][0])
+        self.last_mid = (best_bid + best_ask) / 2.0
+        return self.last_mid
 
     def get_spread(self):
-        if not self.current_orderbook:
-            return None
-        bid = self.current_orderbook['bids'][0][0]
-        ask = self.current_orderbook['asks'][0][0]
-        mid = (bid + ask) / 2.0
-        return (ask - bid) / mid  # Relative spread in %
-
-    def get_funding_rate(self):
-        # Some exchanges return funding info in ticker, otherwise needs fetchFundingRate
-        if self.current_ticker and 'info' in self.current_ticker and 'lastFundingRate' in self.current_ticker['info']:
-             # Binance specific usually
-             return float(self.current_ticker['info']['lastFundingRate'])
-        # Fallback/Generic
-        try:
-             # This is an extra API call, use sparingly or cache
-             funding = self.exchange.fetch_funding_rate(self.symbol)
-             return funding['fundingRate']
-        except:
-             return 0.0
+        if not self.current_book:
+            return 0.0
+        best_bid = float(self.current_book['bids'][0][0])
+        best_ask = float(self.current_book['asks'][0][0])
+        mid = (best_bid + best_ask) / 2.0
+        if mid == 0: return 0.0
+        return (best_ask - best_bid) / mid
 
     def get_realized_volatility(self):
-        """
-        Computes rolling realized volatility (standard deviation of returns)
-        over Config.VOLATILITY_WINDOW.
-        """
         if self.ohlcv_buffer.empty:
             return 0.0
-            
-        df = self.ohlcv_buffer.copy()
-        df['returns'] = df['close'].pct_change()
-        vol = df['returns'].rolling(window=Config.VOLATILITY_WINDOW).std().iloc[-1]
         
-        # If NaN (at start), return 0
+        # Calculate returns
+        df = self.ohlcv_buffer.copy()
+        df['close'] = df['close'].astype(float)
+        df['returns'] = df['close'].pct_change()
+        
+        # Rolling std of last N candles
+        vol = df['returns'].tail(Config.VOLATILITY_WINDOW).std()
+        
         if pd.isna(vol):
             return 0.0
-        return vol
+        return float(vol)
 
     def get_order_book_imbalance(self):
         """
         HARD-CODED FORMULA (DO NOT OPTIMIZE):
         I_book = (Sum(w_i * V_bid) - Sum(w_i * V_ask)) / (Sum(w_i * V_bid) + Sum(w_i * V_ask))
+        
+        With Level 1 data, this simplifies to just the imbalance of the best bid/ask size.
         """
-        if not self.current_orderbook:
+        if not self.current_book:
             return 0.0
             
-        bids = self.current_orderbook['bids'] # List of [price, amount]
-        asks = self.current_orderbook['asks']
+        # Coinbase top level: [price, size, num]
+        bid_size = float(self.current_book['bids'][0][1])
+        ask_size = float(self.current_book['asks'][0][1])
         
-        # Calculate weighted volumes
-        # Using w_i = 1.0 for all levels (unless standard depth weighting is preferred, 
-        # but 1.0 satisfies the summation formula structure explicitly).
-        
-        bid_w_vol_sum = 0.0
-        ask_w_vol_sum = 0.0
-        
-        for i, b in enumerate(bids):
-            w_i = 1.0 # Hard-coded weight (flat)
-            bid_w_vol_sum += (w_i * b[1])
-            
-        for i, a in enumerate(asks):
-            w_i = 1.0 # Hard-coded weight (flat)
-            ask_w_vol_sum += (w_i * a[1])
+        # Weighted sum where w_i=1 for the single level
+        bid_w_vol_sum = bid_size
+        ask_w_vol_sum = ask_size
         
         if (bid_w_vol_sum + ask_w_vol_sum) == 0:
             return 0.0
@@ -144,23 +123,32 @@ class MarketData:
         return (bid_w_vol_sum - ask_w_vol_sum) / (bid_w_vol_sum + ask_w_vol_sum)
 
     def get_order_flow_imbalance(self):
-        """
-        HARD-CODED FORMULA (DO NOT OPTIMIZE):
-        I_flow = (BuyVol - SellVol) / (BuyVol + SellVol)
-        """
-        if not self.recent_trades:
-            return 0.0
-            
-        buy_vol = 0.0
-        sell_vol = 0.0
+        # Coinbase Public API doesn't give easy "recent trades" via REST without auth or heavy polling
+        # For this MVP, we will return 0.0 to focus on Book Imbalance + Volatility,
+        # OR we could poll /products/BTC-USD/trades
+        # Let's try fetching trades if easy, else 0.
         
-        for trade in self.recent_trades:
-            if trade['side'] == 'buy':
-                buy_vol += trade['amount']
-            else:
-                sell_vol += trade['amount']
-                
-        if (buy_vol + sell_vol) == 0:
-            return 0.0
+        try:
+             trades_resp = requests.get(f"{self.base_url}/products/{self.symbol_id}/trades", timeout=2)
+             trades = trades_resp.json()
+             if not isinstance(trades, list):
+                 return 0.0
+                 
+             buy_vol = 0.0
+             sell_vol = 0.0
+             
+             # Coinbase side: "buy" = taker bought (up-tick/at-ask), "sell" = taker sold
+             for t in trades[:50]: # Last 50 trades
+                 size = float(t['size'])
+                 if t['side'] == 'buy':
+                     buy_vol += size
+                 else:
+                     sell_vol += size
             
-        return (buy_vol - sell_vol) / (buy_vol + sell_vol)
+             if (buy_vol + sell_vol) == 0:
+                 return 0.0
+             
+             return (buy_vol - sell_vol) / (buy_vol + sell_vol)
+             
+        except:
+            return 0.0

@@ -5,7 +5,8 @@ from datetime import datetime
 try:
     from config import Config
     from src.market_data import MarketData
-    from src.execution import ExecutionEngine
+    # from src.execution import ExecutionEngine # Deprecated for Phase 2
+    from src.paper_execution import PaperExecutionEngine
     from src.risk import RiskEngine
     from src.alpha import AlphaEngine
     from src.llm_explainer import LLMExplainer
@@ -17,7 +18,8 @@ except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
     from config import Config
     from src.market_data import MarketData
-    from src.execution import ExecutionEngine
+    from src.paper_execution import PaperExecutionEngine
+    # from src.execution import ExecutionEngine
     from src.risk import RiskEngine
     from src.alpha import AlphaEngine
     from src.llm_explainer import LLMExplainer
@@ -36,18 +38,20 @@ logger = logging.getLogger("TradingBot")
 
 class TradingBot:
     def __init__(self):
-        logger.info("Initializing Agent...")
+        logger.info("Initializing Agent (Paper Trading Mode)...")
         self.md = MarketData()
-        self.exec = ExecutionEngine(self.md.exchange)
+        # self.exec = ExecutionEngine(self.md.exchange)
+        self.exec = PaperExecutionEngine(initial_equity=10000.0)
         self.risk = RiskEngine()
         self.alpha = AlphaEngine()
         self.explainer = LLMExplainer(Config.LLM_API_KEY)
         
         # State
         self.entry_time = None
+        self.events_log_path = "events.log"
         
         # For PnL Tracking (simple)
-        self.start_equity = 0.0
+        self.start_equity = 10000.0
 
     def run(self):
         logger.info("Agent Started. Waiting for data...")
@@ -90,9 +94,18 @@ class TradingBot:
             "reason": reason,
             "metrics": metrics
         }
+        
+        # 1. Main Application Log
         logger.info(f"DECISION: {json.dumps(log_entry)}")
         
-        # Trigger LLM Explanation in background (Fire-and-forget)
+        # 2. Events Log (for UI/Backend)
+        try:
+            with open(self.events_log_path, "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to write to events log: {e}")
+        
+        # 3. Trigger LLM Explanation in background
         threading.Thread(target=self._async_explain, args=(log_entry,)).start()
 
     def run_cycle(self):
@@ -149,7 +162,7 @@ class TradingBot:
 
         # 6. Trading Logic
         if position:
-            self._handle_position(position, direction_score, volatility, mid_price, current_metrics)
+            self._handle_position(position, direction_score, volatility, mid_price, current_metrics, spread)
         else:
             self._handle_entry(direction_score, volatility, spread, mid_price, current_equity, current_metrics)
 
@@ -192,9 +205,11 @@ class TradingBot:
             
         logger.info(f"Signal: {direction_str.upper()} | Score: {score:.2f} | Vol: {volatility:.4f} | Leverage: {leverage:.2f}x")
         
-        # Place Order
-        limit_price = mid_price 
-        order = self.exec.place_limit_order(direction_str, qty, limit_price)
+        # Place Order (SIMULATING SPREAD CROSSING)
+        # Buy at Ask (Mid + Spread/2), Sell at Bid (Mid - Spread/2)
+        fill_price = mid_price * (1 + spread/2) if direction_str == 'buy' else mid_price * (1 - spread/2)
+        
+        order = self.exec.place_limit_order(direction_str, qty, fill_price)
         
         if order:
             self.log_decision("TRADE_EXECUTED", f"ENTRY_{direction_str.upper()}", metrics)
@@ -202,12 +217,12 @@ class TradingBot:
         else:
             self.log_decision("TRADE_SKIPPED", "ORDER_SUBMISSION_FAILED", metrics)
 
-    def _handle_position(self, position, score, volatility, mid_price, metrics):
+    def _handle_position(self, position, score, volatility, mid_price, metrics, spread):
         side = position['side']
         should_exit = False
         exit_reason = ""
         
-        metrics['position_pnl'] = position['unrealizedPnL']
+        metrics['position_pnl'] = position['unrealizedPnL'] # Placeholder, handled by exec generally
         metrics['position_side'] = side
 
         # 1. Signal Decay
@@ -245,16 +260,21 @@ class TradingBot:
         if should_exit:
             logger.info(f"Exiting Position ({side}). Reason: {exit_reason}")
             close_side = 'sell' if side == 'long' else 'buy'
-            self.exec.place_limit_order(close_side, position['amount'], mid_price)
+            
+            # SIMULATING SPREAD CROSSING
+            fill_price = mid_price * (1 - spread/2) if close_side == 'sell' else mid_price * (1 + spread/2)
+
+            self.exec.place_limit_order(close_side, position['amount'], fill_price)
             
             self.log_decision("TRADE_EXECUTED", f"EXIT_{exit_reason}", metrics)
 
             self.entry_time = None
-            realized_pnl = position['unrealizedPnL'] 
+            # Approx PnL update (Risk Engine tracks naive PnL for streaks)
+            realized_pnl = (fill_price - entry_price) * position['amount'] if side == 'long' else (entry_price - fill_price) * position['amount']
             self.risk.update_pnl_state(realized_pnl, realized_pnl < 0)
         else:
             # Just holding
-            pass # No log needed for 'HOLD' unless requested, but prompt implies 'decisions'. Holding is passive.
+            pass 
 
 
 if __name__ == "__main__":
