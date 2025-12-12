@@ -1,0 +1,69 @@
+# MVP Perpetual Futures Trading Agent
+
+## Mission
+> Build a perpetual futures trading agent that proves it can survive volatility and compound small edges without blowing up.
+
+## Overview
+This is a **risk-first** algorithmic trading agent designed for crypto perpetual futures (e.g., BTC/USDT). It prioritizes **survivability** over profit maximization by enforcing hard-coded risk constraints and volatility-based position sizing.
+
+**Key Features:**
+- **Modular Architecture**: Separate `Risk`, `Alpha`, `Execution`, and `MarketData` modules.
+- **Hard Risk Constraints**:
+    - Daily PnL Stop (-2%)
+    - Max Consecutive Losses (3)
+    - Max Leverage Cap (5x)
+- **Volatility Sizing**: Position size scales inversely with realized volatility.
+- **No Black Box**: Logic is explicit and deterministic.
+
+## Project Structure
+```
+.
+├── src/
+│   ├── alpha.py        # Signal generation (Orderbook/Flow Imbalance)
+│   ├── bot.py          # Main orchestration loop
+│   ├── execution.py    # Order placement & management
+│   ├── market_data.py  # CCXT integration & feature extraction
+│   └── risk.py         # Hard constraints & sizing logic (CRITICAL)
+├── tests/
+│   └── test_risk.py    # Unit tests for risk constraints
+├── config.py           # Configuration (Risk limits, Symbols, API Keys)
+├── main.py             # Entry point
+├── requirements.txt    # Dependencies
+└── README.md
+```
+
+## Setup & Usage
+
+### 1. Installation
+Clones the repo and install dependencies:
+```bash
+git clone https://github.com/AliZaidi360/Jarvis_AI_Trading_Assistance.git
+cd Jarvis_AI_Trading_Assistance
+pip install -r requirements.txt
+```
+
+### 2. Configuration
+Create a `.env` file or modify `config.py` directly (not recommended for keys):
+```ini
+# .env
+EXCHANGE_API_KEY=your_api_key
+EXCHANGE_SECRET=your_secret
+```
+*Note: By default, `config.py` enables `SANDBOX_MODE = True`. Disable this only when ready for real trading.*
+
+### 3. Run Verification
+Ensure risk logic is working:
+```bash
+python -m unittest tests/test_risk.py
+```
+
+### 4. Run Agent
+```bash
+python main.py
+```
+
+## Risk Philosophy
+The agent enforces strict rules that **cannot** be overridden by the trading signal:
+1. **Capital Preservation**: Never risk more than 0.5% equity per trade.
+2. **Circuit Breakers**: Stop trading immediately if daily drawdown hits 2%.
+3. **Market Regimes**: Do not trade if spread is too high (>0.1%) or liquidity is low.
