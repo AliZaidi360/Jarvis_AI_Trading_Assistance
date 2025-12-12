@@ -63,6 +63,19 @@ class TradingBot:
             # Real-time data might need faster polling, but let's stick to simple loop.
             time.sleep(10) 
 
+    def log_decision(self, decision_type, reason, metrics):
+        """
+        Structured logging for Decision Explanations.
+        decision_type: TRADE_EXECUTED | TRADE_SKIPPED | RISK_LOCKED
+        """
+        log_entry = {
+            "ts": datetime.utcnow().isoformat(),
+            "type": decision_type,
+            "reason": reason,
+            "metrics": metrics
+        }
+        logger.info(f"DECISION: {json.dumps(log_entry)}")
+
     def run_cycle(self):
         # 1. Update Market Data
         if not self.md.fetch_data():
@@ -83,45 +96,65 @@ class TradingBot:
         position = self.exec.get_position()
         current_equity = float(self.exec.fetch_balance()['total'])
         
+        # Metrics snapshot for logging
+        current_metrics = {
+            "price": mid_price,
+            "spread": spread,
+            "volatility": volatility,
+            "score": direction_score,
+            "equity": current_equity,
+            "imbalance_book": book_imb,
+            "imbalance_flow": flow_imb
+        }
+
         # 5. Risk Checks (Global)
         self.exec.check_timeouts()
         if not self.risk.check_daily_drawdown(current_equity, self.start_equity):
+            self.log_decision("RISK_LOCKED", "DAILY_DRAWDOWN_LIMIT", current_metrics)
             logger.critical("Global Risk Stop Triggered.")
             return # Stop trading
-            
+
+        # Internal lockout check (loss streak etc)
+        if not self.risk.is_active:
+             self.log_decision("RISK_LOCKED", "PREVIOUS_RISK_VIOLATION", current_metrics)
+             return
+
         # Log Heartbeat
         log_entry = {
             "ts": datetime.utcnow().isoformat(),
             "mid": mid_price,
-            "spread": spread,
-            "vol": volatility,
             "score": direction_score,
             "pos": position['amount'] if position else 0,
-            "equity": current_equity
         }
         logger.info(f"Heartbeat: {json.dumps(log_entry)}")
 
         # 6. Trading Logic
         if position:
-            self._handle_position(position, direction_score, volatility, mid_price)
+            self._handle_position(position, direction_score, volatility, mid_price, current_metrics)
         else:
-            self._handle_entry(direction_score, volatility, spread, mid_price, current_equity)
+            self._handle_entry(direction_score, volatility, spread, mid_price, current_equity, current_metrics)
 
-    def _handle_entry(self, score, volatility, spread, mid_price, equity):
-        # Entry Threshold: Score magnitude > 0.5 (arbitrary for MVP or define in config)
-        # Prompt says: "Direction score" -> Long/Short.
-        # Let's say abs(score) > 0.4 implies strong conviction.
-        
+    def _handle_entry(self, score, volatility, spread, mid_price, equity, metrics):
+        # Entry Threshold
         threshold = 0.4
         
         if abs(score) < threshold:
-            return # No signal
+            self.log_decision("TRADE_SKIPPED", "WEAK_SIGNAL", metrics)
+            return 
             
         direction_str = 'buy' if score > 0 else 'sell'
         
         # Risk Check
         can_trade = self.risk.check_can_trade(spread)
         if not can_trade:
+            # Determine specific risk reason (approximate re-check for logging)
+            reason = "RISK_CONSTRAINT"
+            if spread > Config.MAX_SPREAD_THRESHOLD:
+                reason = "SPREAD_TOO_HIGH"
+            elif self.risk.consecutive_losses >= Config.MAX_CONSECUTIVE_LOSSES:
+                reason = "MAX_CONSECUTIVE_LOSSES"
+            
+            self.log_decision("TRADE_SKIPPED", reason, metrics)
             return
             
         # Sizing
@@ -130,46 +163,46 @@ class TradingBot:
             equity, volatility, mid_price, spread
         )
         
+        metrics['calculated_leverage'] = leverage
+        metrics['calculated_qty'] = qty
+
         if qty == 0:
+            self.log_decision("TRADE_SKIPPED", "ZERO_SIZE_CALC (High Vol?)", metrics)
             logger.warning("Risk calc returned 0 size (volatility too high?).")
             return
             
         logger.info(f"Signal: {direction_str.upper()} | Score: {score:.2f} | Vol: {volatility:.4f} | Leverage: {leverage:.2f}x")
         
         # Place Order
-        # Using Limit order slightly better than best bid/ask or at mid?
-        # Prompt: "Prefer limit orders near mid-price"
-        limit_price = mid_price # Simple mid-fill attempt
+        limit_price = mid_price 
+        order = self.exec.place_limit_order(direction_str, qty, limit_price)
         
-        self.exec.place_limit_order(direction_str, qty, limit_price)
-        self.entry_time = datetime.utcnow()
+        if order:
+            self.log_decision("TRADE_EXECUTED", f"ENTRY_{direction_str.upper()}", metrics)
+            self.entry_time = datetime.utcnow()
+        else:
+            self.log_decision("TRADE_SKIPPED", "ORDER_SUBMISSION_FAILED", metrics)
 
-    def _handle_position(self, position, score, volatility, mid_price):
-        # 1. Signal Decay
-        # If long and score drops < 0, or short and score > 0 -> Exit?
-        # Prompt: "Exit ... Signal decay"
-        # Let's be strict: if signal flips, exit.
-        
+    def _handle_position(self, position, score, volatility, mid_price, metrics):
         side = position['side']
         should_exit = False
         exit_reason = ""
         
-        if side == 'long' and score < -0.1: # Buffer
+        metrics['position_pnl'] = position['unrealizedPnL']
+        metrics['position_side'] = side
+
+        # 1. Signal Decay
+        if side == 'long' and score < -0.1: 
             should_exit = True
-            exit_reason = "Signal Reversal"
+            exit_reason = "SIGNAL_REVERSAL"
         elif side == 'short' and score > 0.1:
             should_exit = True
-            exit_reason = "Signal Reversal"
+            exit_reason = "SIGNAL_REVERSAL"
             
-        # 2. Volatility Stop / Price Stop
-        # Ideally, stop order is placed on exchange.
-        # Here we check manually for MVP if we didn't place OCO.
+        # 2. Volatility Stop
         entry_price = position['entryPrice']
         pnl_pct = (mid_price - entry_price) / entry_price if side == 'long' else (entry_price - mid_price) / entry_price
         
-        # Calc stop distance
-        # Stop = m * sigma * sqrt(h)
-        # If price hit stop -> Exit
         stop_price = self.risk.get_stop_loss_price(entry_price, 1 if side == 'long' else -1, volatility)
         
         stop_hit = False
@@ -180,34 +213,30 @@ class TradingBot:
             
         if stop_hit:
             should_exit = True
-            exit_reason = "Volatility Stop"
+            exit_reason = "VOLATILITY_STOP"
 
         # 3. Time Stop
         if self.entry_time:
             duration_min = (datetime.utcnow() - self.entry_time).total_seconds() / 60
-            if duration_min > Config.MAX_HOLD_DURATION_CANDLES: # Assuming 1m candle count ~= min
-                # Only exit if PnL is not favorable? Or hard exit?
-                # Prompt: "Position open longer than ... without favorable movement"
+            if duration_min > Config.MAX_HOLD_DURATION_CANDLES: 
                 if pnl_pct <= 0:
                     should_exit = True
-                    exit_reason = "Time Stop"
+                    exit_reason = "TIME_STOP"
 
         if should_exit:
             logger.info(f"Exiting Position ({side}). Reason: {exit_reason}")
-            # Place Market Order to close immediately?
-            # Or aggressively priced limit.
             close_side = 'sell' if side == 'long' else 'buy'
             self.exec.place_limit_order(close_side, position['amount'], mid_price)
             
-            # Note: A real system would track this close order until filled.
-            # Here we reset entry_time
+            self.log_decision("TRADE_EXECUTED", f"EXIT_{exit_reason}", metrics)
+
             self.entry_time = None
-            
-            # Update Risk State?
-            # We need realized PnL. ExecutionEngine needs to track fills to give realized PnL.
-            # For MVP, we estimate PnL from mid_price close.
-            realized_pnl = position['unrealizedPnL'] # Approx
+            realized_pnl = position['unrealizedPnL'] 
             self.risk.update_pnl_state(realized_pnl, realized_pnl < 0)
+        else:
+            # Just holding
+            pass # No log needed for 'HOLD' unless requested, but prompt implies 'decisions'. Holding is passive.
+
 
 if __name__ == "__main__":
     bot = TradingBot()
